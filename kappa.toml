@@ -1,0 +1,38 @@
+timezone = "America/New_York"
+timeout_seconds = 90
+prompt = "Reply exactly: OK"
+log_file = "~/.local/state/kappa/kappa.log"
+lock_file = "~/.local/state/kappa/kappa.lock"
+path = "~/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+
+[providers.claude]
+enabled = true
+command = [
+  "claude",
+  "--safe-mode",
+  "--tools",
+  "",
+  "--no-session-persistence",
+  "-p",
+]
+
+[providers.opencode]
+enabled = true
+command = [
+  "opencode",
+  "run",
+  "--pure",
+]
+
+[providers.codex]
+enabled = true
+command = [
+  "codex",
+  "exec",
+  "--sandbox",
+  "read-only",
+  "--ask-for-approval",
+  "never",
+  "--ephemeral",
+  "--skip-git-repo-check",
+]
