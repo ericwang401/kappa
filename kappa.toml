@@ -11,7 +11,11 @@ command = [
   "claude",
   "--safe-mode",
   "--model",
-  "fable",
+  "haiku",
+  "--effort",
+  "low",
+  "--max-budget-usd",
+  "0.01",
   "--tools",
   "",
   "--no-session-persistence",
@@ -19,7 +23,7 @@ command = [
 ]
 
 [providers.opencode]
-enabled = true
+enabled = false
 command = [
   "opencode",
   "run",
@@ -31,8 +35,10 @@ enabled = true
 command = [
   "codex",
   "exec",
-  "--model",
-  "gpt-5-nano",
+  "--config",
+  "model_reasoning_effort=\"minimal\"",
+  "--config",
+  "model_verbosity=\"low\"",
   "--sandbox",
   "read-only",
   "--ephemeral",
