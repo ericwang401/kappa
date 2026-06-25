@@ -69,18 +69,27 @@ Default schedule:
 
 ```cron
 CRON_TZ=America/New_York
-30 2,7,12,17,22 * * * /usr/bin/python3 /absolute/path/to/kappa.py --config /absolute/path/to/kappa.toml run
+30 7 * * * /usr/bin/python3 /absolute/path/to/kappa.py --config /absolute/path/to/kappa.toml run
+35 12 * * * /usr/bin/python3 /absolute/path/to/kappa.py --config /absolute/path/to/kappa.toml run
+40 17 * * * /usr/bin/python3 /absolute/path/to/kappa.py --config /absolute/path/to/kappa.toml run
+45 22 * * * /usr/bin/python3 /absolute/path/to/kappa.py --config /absolute/path/to/kappa.toml run
+30 2 * * * /usr/bin/python3 /absolute/path/to/kappa.py --config /absolute/path/to/kappa.toml run
 ```
 
 That runs at:
 
 ```text
-2:30 AM ET
 7:30 AM ET
-12:30 PM ET
-5:30 PM ET
-10:30 PM ET
+12:35 PM ET
+5:40 PM ET
+10:45 PM ET
+2:30 AM ET
 ```
+
+The usage window does not reset on a fixed clock; it resets roughly five hours
+after the window's first message lands. The daytime fire times are spaced a
+little over five hours apart (5h5m) so each one lands just after the previous
+window resets instead of just before it, rather than at an exact five‑hour mark.
 
 Install it with:
 
@@ -88,7 +97,7 @@ Install it with:
 crontab -e
 ```
 
-Paste the two cron lines printed by `python3 kappa.py cron`.
+Paste the lines printed by `python3 kappa.py cron` (the `CRON_TZ` line plus one line per fire time).
 
 ## Logs
 

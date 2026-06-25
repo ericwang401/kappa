@@ -31,7 +31,16 @@ except ImportError:  # pragma: no cover - Python < 3.9 only.
 
 MIN_PYTHON = (3, 11)
 DEFAULT_CONFIG = Path(__file__).with_name("kappa.toml")
-DEFAULT_SCHEDULE = "30 2,7,12,17,22 * * *"
+# Fixed fire times anchored to the daily routine. The daytime slots are spaced a
+# little over five hours apart so each lands just after the previous usage window
+# resets (the window resets ~5h after its first message, not on a fixed clock).
+DEFAULT_SCHEDULE = [
+    "30 7 * * *",   # 7:30 AM
+    "35 12 * * *",  # 12:35 PM
+    "40 17 * * *",  # 5:40 PM
+    "45 22 * * *",  # 10:45 PM
+    "30 2 * * *",   # 2:30 AM
+]
 
 
 class ConfigError(Exception):
@@ -277,7 +286,8 @@ def cron(args: argparse.Namespace) -> int:
     script = quote(str(script_path))
     config_arg = quote(str(config_path))
     print(f"CRON_TZ={config['timezone']}")
-    print(f"{args.schedule} {python} {script} --config {config_arg} run")
+    for schedule in args.schedule:
+        print(f"{schedule} {python} {script} --config {config_arg} run")
     return 0
 
 
@@ -302,8 +312,13 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subcommands.add_parser("doctor", parents=[common], help="check config and commands")
     doctor_parser.set_defaults(func=doctor)
 
-    cron_parser = subcommands.add_parser("cron", parents=[common], help="print a Linux cron entry")
-    cron_parser.add_argument("--schedule", default=DEFAULT_SCHEDULE, help="cron schedule expression")
+    cron_parser = subcommands.add_parser("cron", parents=[common], help="print Linux cron entries")
+    cron_parser.add_argument(
+        "--schedule",
+        nargs="+",
+        default=DEFAULT_SCHEDULE,
+        help="one or more cron schedule expressions (default: the routine fire times)",
+    )
     cron_parser.set_defaults(func=cron)
 
     return parser
