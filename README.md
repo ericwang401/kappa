@@ -98,6 +98,29 @@ Default log file:
 
 Each run records provider start, success, failure, timeout, or skipped overlapping execution.
 
+### Log Rotation
+
+The sample `logrotate.kappa` config keeps logs bounded for a root-owned VPS install. It rotates weekly and keeps two compressed archives.
+
+Install it with:
+
+```bash
+sudo cp /opt/kappa/logrotate.kappa /etc/logrotate.d/kappa
+sudo chmod 644 /etc/logrotate.d/kappa
+```
+
+Check that logrotate accepts the config:
+
+```bash
+sudo logrotate -d /etc/logrotate.d/kappa
+```
+
+Apply it immediately once, if desired:
+
+```bash
+sudo logrotate /etc/logrotate.d/kappa
+```
+
 ## Locking
 
 `kappa` uses a non-blocking lock file so overlapping cron runs do not stack up.
