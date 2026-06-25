@@ -29,7 +29,7 @@ prompt = "Reply exactly: OK"
 
 If cron cannot find a provider command, update `path` or use absolute command paths in each provider's `command` array. The default includes common Linux paths plus `/opt/homebrew/bin` for local macOS testing.
 
-The default Claude command uses the `haiku` alias with low effort and a small per-run budget cap. The default Codex command does not pin a model name, because Codex's lower-cost model IDs change over time; it only requests minimal reasoning effort and low verbosity.
+The default Claude command uses the `haiku` alias with low effort and a small per-run budget cap. The default Codex command does not pin a model name, because Codex's lower-cost model IDs change over time; it only requests low reasoning effort and low verbosity.
 
 ## Check Setup
 

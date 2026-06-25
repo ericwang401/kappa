@@ -36,7 +36,7 @@ command = [
   "codex",
   "exec",
   "--config",
-  "model_reasoning_effort=\"minimal\"",
+  "model_reasoning_effort=\"low\"",
   "--config",
   "model_verbosity=\"low\"",
   "--sandbox",
