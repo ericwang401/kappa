@@ -31,8 +31,6 @@ command = [
   "exec",
   "--sandbox",
   "read-only",
-  "--ask-for-approval",
-  "never",
   "--ephemeral",
   "--skip-git-repo-check",
 ]
