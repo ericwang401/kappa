@@ -10,6 +10,8 @@ enabled = true
 command = [
   "claude",
   "--safe-mode",
+  "--model",
+  "fable",
   "--tools",
   "",
   "--no-session-persistence",
@@ -29,6 +31,8 @@ enabled = true
 command = [
   "codex",
   "exec",
+  "--model",
+  "gpt-5-nano",
   "--sandbox",
   "read-only",
   "--ephemeral",
