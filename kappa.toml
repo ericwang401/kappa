@@ -8,6 +8,10 @@ path = "~/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
 [providers.claude]
 enabled = true
 check_url = "https://api.anthropic.com/"
+# Logged after a successful warmup. `claude /usage` is a read-only status query
+# (it does not consume the window) and prints the rolling session usage + reset,
+# e.g. "Current session: 51% used · resets Jun 27, 11:39pm".
+status_command = ["claude", "--safe-mode", "--no-session-persistence", "-p", "/usage"]
 command = [
   "claude",
   "--safe-mode",
@@ -37,6 +41,12 @@ check_url = "https://chatgpt.com/"
 # Codex reasoning on the default model can run well past the global 90s cap; a
 # killed run never lands a message, so the 5-hour window never starts.
 timeout_seconds = 180
+# Logged after a successful warmup. Codex only exposes its windows via the
+# interactive /status; codex_usage.py runs the same app-server RPC headlessly and
+# prints e.g. "5h: 2% used, resets ... | weekly: 1% used, resets ...". It reaches
+# chatgpt.com, so it only runs when the warmup above already succeeded (i.e. once
+# Codex connectivity works). Point the path at the deployed helper.
+status_command = ["python3", "/opt/kappa/codex_usage.py"]
 command = [
   "codex",
   "exec",

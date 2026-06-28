@@ -139,6 +139,15 @@ def load_config(path: Path) -> dict[str, Any]:
             )
         ):
             raise ConfigError(f"providers.{name}.env must be a table of string values")
+        status_command = provider.get("status_command")
+        if status_command is not None and (
+            not isinstance(status_command, list)
+            or not status_command
+            or not all(isinstance(part, str) for part in status_command)
+        ):
+            raise ConfigError(
+                f"providers.{name}.status_command must be a non-empty string array"
+            )
 
     return config
 
@@ -223,15 +232,50 @@ def provider_names(config: dict[str, Any], requested: list[str]) -> list[str]:
     return [name for name, provider in providers.items() if provider["enabled"]]
 
 
-def run_provider(config: dict[str, Any], name: str) -> bool:
-    provider = config["providers"][name]
-    command = [*provider["command"], config["prompt"]]
-    timeout = provider.get("timeout_seconds", config["timeout_seconds"])
+def build_env(config: dict[str, Any], provider: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
     env["PATH"] = expand_path_list(config["path"])
     # Per-provider env overrides let one provider route through a proxy / exit
     # node (e.g. HTTPS_PROXY, ALL_PROXY) without forcing it on the others.
     env.update(provider.get("env", {}))
+    return env
+
+
+def log_window(config: dict[str, Any], name: str) -> None:
+    """Best-effort: run a provider's status_command and log the window state.
+
+    Some CLIs report the rolling usage window (e.g. `claude /usage` prints
+    "Current session: 51% used · resets ..."). This is a read-only status query,
+    not a model call, so it does not consume the window it reports on. Failures
+    here never affect the warmup result.
+    """
+    provider = config["providers"][name]
+    status_command = provider.get("status_command")
+    if not status_command:
+        return
+    timeout = provider.get("timeout_seconds", config["timeout_seconds"])
+    try:
+        result = subprocess.run(
+            status_command,
+            env=build_env(config, provider),
+            timeout=timeout,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+    text = " ".join((result.stdout or result.stderr or "").split())[:300]
+    if text:
+        log_line(config, f"provider={name} status=window detail={quote(text)}")
+
+
+def run_provider(config: dict[str, Any], name: str) -> bool:
+    provider = config["providers"][name]
+    command = [*provider["command"], config["prompt"]]
+    timeout = provider.get("timeout_seconds", config["timeout_seconds"])
+    env = build_env(config, provider)
 
     command_text = " ".join(quote(part) for part in command)
     log_line(config, f"provider={name} status=start timeout={timeout}s command={command_text}")
@@ -267,6 +311,7 @@ def run_provider(config: dict[str, Any], name: str) -> bool:
         reply = " ".join(result.stdout.split())[:200]
         reply_field = f" reply={quote(reply)}" if reply else " reply="
         log_line(config, f"provider={name} status=ok exit=0 duration={duration:.2f}s{reply_field}")
+        log_window(config, name)
         print(f"{name}: ok")
         return True
 
@@ -403,9 +448,98 @@ def cron(args: argparse.Namespace) -> int:
     python = quote(sys.executable)
     script = quote(str(script_path))
     config_arg = quote(str(config_path))
-    print(f"CRON_TZ={config['timezone']}")
-    for schedule in args.schedule:
-        print(f"{schedule} {python} {script} --config {config_arg} run")
+    timezone = config["timezone"]
+    invocation = f"{python} {script} --config {config_arg} run"
+
+    if args.cron_d:
+        # Debian/Ubuntu cron honors CRON_TZ in /etc/crontab and /etc/cron.d files,
+        # where each line also names the user to run as.
+        print(f"# Install to /etc/cron.d/kappa (root-owned, not group/other-writable).")
+        print(f"CRON_TZ={timezone}")
+        for schedule in args.schedule:
+            print(f"{schedule} {quote(args.user)} {invocation}")
+    else:
+        # CRON_TZ is ignored in a per-user crontab, so a bare line would be a
+        # silent no-op. Times run in the host timezone instead.
+        print(f"# These entries run in the host timezone, NOT {timezone}: CRON_TZ is")
+        print(f"# ignored in a user crontab. Match the host clock with:")
+        print(f"#   sudo timedatectl set-timezone {timezone}")
+        print(f"# or install under /etc/cron.d instead with: kappa cron --cron-d")
+        for schedule in args.schedule:
+            print(f"{schedule} {invocation}")
+    return 0
+
+
+def cron_to_oncalendar(expr: str, timezone: str) -> str:
+    """Convert a daily 'M H * * *' cron expression to a systemd OnCalendar line.
+
+    systemd timers (unlike Debian cron) honor a timezone suffix on OnCalendar and
+    handle DST, so this is the reliable way to anchor fire times to a zone while
+    the host clock stays on UTC.
+    """
+    parts = expr.split()
+    if len(parts) != 5:
+        raise ConfigError(f"cannot convert schedule to OnCalendar: {expr!r}")
+    minute, hour, dom, month, dow = parts
+    if (dom, month, dow) != ("*", "*", "*"):
+        raise ConfigError(
+            f"systemd output supports only daily 'M H * * *' schedules; got {expr!r}"
+        )
+    try:
+        hour_n, minute_n = int(hour), int(minute)
+    except ValueError:
+        raise ConfigError(f"cannot convert schedule to OnCalendar: {expr!r}")
+    return f"*-*-* {hour_n:02d}:{minute_n:02d}:00 {timezone}"
+
+
+def systemd(args: argparse.Namespace) -> int:
+    config_path = expand_path(args.config).resolve()
+    script_path = Path(__file__).resolve()
+    config = load_config(config_path)
+    timezone = config["timezone"]
+    oncalendars = [cron_to_oncalendar(expr, timezone) for expr in args.schedule]
+    exec_start = f"{sys.executable} {script_path} --config {config_path} run"
+
+    service = (
+        "[Unit]\n"
+        "Description=kappa warmup run (keeps AI usage windows warm)\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={exec_start}\n"
+    )
+    timer = (
+        "[Unit]\n"
+        f"Description=kappa warmup schedule (times in {timezone}, DST-correct)\n\n"
+        "[Timer]\n"
+        + "".join(f"OnCalendar={entry}\n" for entry in oncalendars)
+        + "AccuracySec=30s\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+    service_path = Path(args.unit_dir) / f"{args.name}.service"
+    timer_path = Path(args.unit_dir) / f"{args.name}.timer"
+
+    if args.write:
+        service_path.write_text(service, encoding="utf-8")
+        timer_path.write_text(timer, encoding="utf-8")
+        print(f"wrote {service_path}")
+        print(f"wrote {timer_path}")
+        print("next:")
+        print("  sudo systemctl daemon-reload")
+        print(f"  sudo systemctl enable --now {args.name}.timer")
+        print(f"  systemctl list-timers {args.name}.timer")
+        return 0
+
+    print(f"# ===== {service_path} =====")
+    print(service)
+    print(f"# ===== {timer_path} =====")
+    print(timer)
+    print("# Write these files (or re-run with --write), then:")
+    print("#   sudo systemctl daemon-reload")
+    print(f"#   sudo systemctl enable --now {args.name}.timer")
     return 0
 
 
@@ -437,7 +571,41 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SCHEDULE,
         help="one or more cron schedule expressions (default: the routine fire times)",
     )
+    cron_parser.add_argument(
+        "--cron-d",
+        action="store_true",
+        help="emit /etc/cron.d format (CRON_TZ honored, lines include the run-as user)",
+    )
+    cron_parser.add_argument(
+        "--user",
+        default="root",
+        help="run-as user for --cron-d lines (default: root)",
+    )
     cron_parser.set_defaults(func=cron)
+
+    systemd_parser = subcommands.add_parser(
+        "systemd",
+        parents=[common],
+        help="print (or write) a systemd service + timer (TZ-aware, DST-correct)",
+    )
+    systemd_parser.add_argument(
+        "--schedule",
+        nargs="+",
+        default=DEFAULT_SCHEDULE,
+        help="daily 'M H * * *' expressions (default: the routine fire times)",
+    )
+    systemd_parser.add_argument("--name", default="kappa", help="unit base name (default: kappa)")
+    systemd_parser.add_argument(
+        "--unit-dir",
+        default="/etc/systemd/system",
+        help="directory for the unit files (default: /etc/systemd/system)",
+    )
+    systemd_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="write the unit files to --unit-dir instead of printing them",
+    )
+    systemd_parser.set_defaults(func=systemd)
 
     return parser
 
