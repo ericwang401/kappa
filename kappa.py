@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from shlex import quote
@@ -118,8 +120,60 @@ def load_config(path: Path) -> dict[str, Any]:
             or not all(isinstance(part, str) for part in command)
         ):
             raise ConfigError(f"providers.{name}.command must be a non-empty string array")
+        if "timeout_seconds" in provider:
+            provider_timeout = provider["timeout_seconds"]
+            if not isinstance(provider_timeout, int) or provider_timeout <= 0:
+                raise ConfigError(
+                    f"providers.{name}.timeout_seconds must be a positive integer"
+                )
+        if "check_url" in provider and (
+            not isinstance(provider["check_url"], str) or not provider["check_url"]
+        ):
+            raise ConfigError(f"providers.{name}.check_url must be a non-empty string")
+        provider_env = provider.get("env")
+        if provider_env is not None and (
+            not isinstance(provider_env, dict)
+            or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in provider_env.items()
+            )
+        ):
+            raise ConfigError(f"providers.{name}.env must be a table of string values")
 
     return config
+
+
+# Substrings that explain *why* a provider run failed, so the log says more than
+# "timeout" or "error". Network signatures usually mean the host cannot reach the
+# provider API at all (e.g. a datacenter IP blocked by the provider's edge).
+NETWORK_SIGNATURES = (
+    "connection reset by peer",
+    "recv failure",
+    "error sending request",
+    "failed to connect to websocket",
+    "transport channel closed",
+    "reconnecting...",
+    "connection refused",
+    "temporary failure in name resolution",
+    "timed out",
+)
+LIMIT_SIGNATURES = (
+    "usage limit",
+    "rate limit",
+    "rate_limit",
+    "quota",
+    "try again at",
+)
+
+
+def failure_hint(*chunks: str) -> str:
+    """Classify provider output into a short hint for the log line."""
+    text = " ".join(chunk for chunk in chunks if chunk).lower()
+    if any(sig in text for sig in LIMIT_SIGNATURES):
+        return " hint=usage-limit"
+    if any(sig in text for sig in NETWORK_SIGNATURES):
+        return " hint=network-unreachable"
+    return ""
 
 
 def now(config: dict[str, Any]) -> str:
@@ -172,18 +226,22 @@ def provider_names(config: dict[str, Any], requested: list[str]) -> list[str]:
 def run_provider(config: dict[str, Any], name: str) -> bool:
     provider = config["providers"][name]
     command = [*provider["command"], config["prompt"]]
+    timeout = provider.get("timeout_seconds", config["timeout_seconds"])
     env = os.environ.copy()
     env["PATH"] = expand_path_list(config["path"])
+    # Per-provider env overrides let one provider route through a proxy / exit
+    # node (e.g. HTTPS_PROXY, ALL_PROXY) without forcing it on the others.
+    env.update(provider.get("env", {}))
 
     command_text = " ".join(quote(part) for part in command)
-    log_line(config, f"provider={name} status=start command={command_text}")
+    log_line(config, f"provider={name} status=start timeout={timeout}s command={command_text}")
     start = time.monotonic()
 
     try:
         result = subprocess.run(
             command,
             env=env,
-            timeout=config["timeout_seconds"],
+            timeout=timeout,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -194,23 +252,30 @@ def run_provider(config: dict[str, Any], name: str) -> bool:
         log_line(config, f"provider={name} status=missing duration={duration:.2f}s")
         print(f"{name}: command not found: {command[0]}", file=sys.stderr)
         return False
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         duration = time.monotonic() - start
-        log_line(config, f"provider={name} status=timeout duration={duration:.2f}s")
-        print(f"{name}: timed out after {config['timeout_seconds']}s", file=sys.stderr)
+        partial = (exc.stdout or "") + " " + (exc.stderr or "")
+        hint = failure_hint(partial)
+        log_line(config, f"provider={name} status=timeout duration={duration:.2f}s{hint}")
+        print(f"{name}: timed out after {timeout}s", file=sys.stderr)
         return False
 
     duration = time.monotonic() - start
     if result.returncode == 0:
-        log_line(config, f"provider={name} status=ok exit=0 duration={duration:.2f}s")
+        # Record the model's reply so the log proves the prompt actually landed
+        # (and so a window-warming run is distinguishable from a silent no-op).
+        reply = " ".join(result.stdout.split())[:200]
+        reply_field = f" reply={quote(reply)}" if reply else " reply="
+        log_line(config, f"provider={name} status=ok exit=0 duration={duration:.2f}s{reply_field}")
         print(f"{name}: ok")
         return True
 
     stderr = " ".join(result.stderr.split())[:500]
     detail = f" stderr={quote(stderr)}" if stderr else ""
+    hint = failure_hint(result.stderr, result.stdout)
     log_line(
         config,
-        f"provider={name} status=error exit={result.returncode} duration={duration:.2f}s{detail}",
+        f"provider={name} status=error exit={result.returncode} duration={duration:.2f}s{hint}{detail}",
     )
     print(f"{name}: failed with exit {result.returncode}", file=sys.stderr)
     return False
@@ -275,7 +340,60 @@ def doctor(args: argparse.Namespace) -> int:
             if provider["enabled"]:
                 ok = False
 
+        proxies = proxies_from_env(provider.get("env", {}))
+        if proxies:
+            print(f"  proxy: {', '.join(sorted(proxies.values()))}")
+        check_url = provider.get("check_url")
+        if check_url:
+            reachable, detail = check_reachable(check_url, proxies=proxies)
+            if reachable:
+                print(f"  reach {check_url}: ok ({detail})")
+            else:
+                print(f"  reach {check_url}: FAIL ({detail})", file=sys.stderr)
+                if provider["enabled"]:
+                    ok = False
+
     return 0 if ok else 1
+
+
+def proxies_from_env(env: dict[str, str]) -> dict[str, str]:
+    """Extract http/https proxy settings from a provider's env overrides.
+
+    Lets `doctor` probe the same routed path a provider would use. SOCKS proxies
+    (ALL_PROXY=socks5://...) need PySocks for the probe and are skipped here, but
+    they still work for the provider run itself.
+    """
+    proxies: dict[str, str] = {}
+    for scheme in ("http", "https"):
+        for key in (f"{scheme}_proxy", f"{scheme.upper()}_PROXY"):
+            value = env.get(key)
+            if value and value.lower().startswith(("http://", "https://")):
+                proxies[scheme] = value
+    return proxies
+
+
+def check_reachable(
+    url: str, timeout: float = 10.0, proxies: dict[str, str] | None = None
+) -> tuple[bool, str]:
+    """Best-effort reachability probe for a provider API host.
+
+    A blocked datacenter IP shows up here as a connection reset / refused, which
+    is the failure mode that silently breaks a provider while the CLI is healthy.
+    Any HTTP response (even 401/403/404) counts as reachable. When `proxies` is
+    given, the probe goes through it so it tests the same routed path.
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies or {}))
+    request = urllib.request.Request(url, method="HEAD")
+    start = time.monotonic()
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return True, f"http {response.status} in {time.monotonic() - start:.2f}s"
+    except urllib.error.HTTPError as error:
+        return True, f"http {error.code} in {time.monotonic() - start:.2f}s"
+    except urllib.error.URLError as error:
+        return False, f"{error.reason} after {time.monotonic() - start:.2f}s"
+    except OSError as error:
+        return False, f"{error} after {time.monotonic() - start:.2f}s"
 
 
 def cron(args: argparse.Namespace) -> int:

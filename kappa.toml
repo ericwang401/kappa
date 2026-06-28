@@ -7,6 +7,7 @@ path = "~/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
 
 [providers.claude]
 enabled = true
+check_url = "https://api.anthropic.com/"
 command = [
   "claude",
   "--safe-mode",
@@ -32,6 +33,10 @@ command = [
 
 [providers.codex]
 enabled = true
+check_url = "https://chatgpt.com/"
+# Codex reasoning on the default model can run well past the global 90s cap; a
+# killed run never lands a message, so the 5-hour window never starts.
+timeout_seconds = 180
 command = [
   "codex",
   "exec",
@@ -44,3 +49,18 @@ command = [
   "--ephemeral",
   "--skip-git-repo-check",
 ]
+
+# chatgpt.com (Codex's ChatGPT-login endpoint) is often blocked from datacenter
+# IPs. If `kappa doctor` shows codex's check_url failing, route just this provider
+# through a residential egress by uncommenting an env table below. Any of these
+# work; kappa stays provider-agnostic and does not depend on a specific tool.
+#
+# Through an HTTP proxy on a residential box (also probed by `doctor`):
+# [providers.codex.env]
+# HTTPS_PROXY = "http://10.0.0.5:8080"
+#
+# Through a Tailscale exit node exposing a SOCKS proxy (run-only, not probed):
+# [providers.codex.env]
+# ALL_PROXY = "socks5://127.0.0.1:1055"
+#
+# Alternatively, wrap the command itself, e.g. command = ["proxychains4", "codex", ...].
