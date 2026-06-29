@@ -500,6 +500,10 @@ def systemd(args: argparse.Namespace) -> int:
     oncalendars = [cron_to_oncalendar(expr, timezone) for expr in args.schedule]
     exec_start = f"{sys.executable} {script_path} --config {config_path} run"
 
+    # User= makes systemd resolve the account from passwd and set $HOME/$USER/
+    # $LOGNAME accordingly, so the config's ~-relative path and the CLIs' own
+    # credential dirs (~/.claude, ~/.codex) resolve to that user, not root.
+    run_as = f"User={args.user}\n" if args.user else ""
     service = (
         "[Unit]\n"
         "Description=kappa warmup run (keeps AI usage windows warm)\n"
@@ -507,6 +511,7 @@ def systemd(args: argparse.Namespace) -> int:
         "Wants=network-online.target\n\n"
         "[Service]\n"
         "Type=oneshot\n"
+        f"{run_as}"
         f"ExecStart={exec_start}\n"
     )
     timer = (
@@ -595,6 +600,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="daily 'M H * * *' expressions (default: the routine fire times)",
     )
     systemd_parser.add_argument("--name", default="kappa", help="unit base name (default: kappa)")
+    systemd_parser.add_argument(
+        "--user",
+        default="",
+        help="run the service as this user via User= (default: unset, i.e. root)",
+    )
     systemd_parser.add_argument(
         "--unit-dir",
         default="/etc/systemd/system",
